@@ -1,207 +1,131 @@
 # 短视频无水印下载器
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-ff69b4.svg)
-
-一个功能强大的**短视频无水印下载器**，支持抖音、B站、小红书、快手等主流平台。采用剪贴板监控模式，复制链接即可自动下载。同时配备 **ASR 语音转文字**功能，使用 faster-whisper 引擎支持 GPU 加速。
-
----
-
-## 📌 当前版本：v4.1
-
-### v4.1 更新说明
-
-| 更新内容 | 说明 |
-|---------|------|
-| 🌐 HuggingFace 国内镜像 | 新增 hf-mirror.com 镜像源，解决模型下载超时问题 |
-| 🎵 链接ASR音频优化 | 链接转文字时只下载音频流，不再下载完整视频 |
-| 🧹 临时文件自动清理 | ASR识别完成后自动删除临时音频文件 |
-
----
+一款支持抖音、B站、小红书、快手等主流平台的无水印视频下载工具，同时具备音频提取和语音转文字(ASR)功能。
 
 ## ✨ 核心功能
 
-### 🎬 无水印视频下载
-- **支持平台**：抖音、B站、小红书、快手
-- **剪贴板监控**：复制链接自动检测并下载，无需手动操作
-- **自动分类**：按平台自动创建文件夹整理下载文件
+- 🎬 **无水印下载** - 支持抖音/B站/小红书/快手等平台
+- 🎵 **音频提取** - 一键提取MP3格式音频
+- 📝 **语音转文字(ASR)** - faster-whisper语音识别，输出txt+srt双格式
+- 🔗 **剪贴板监控** - 复制链接自动下载，无需手动操作
+- ⚡ **GPU加速** - 支持CUDA加速识别
+- 📦 **多模型选择** - tiny/base/small/medium按需选择
 
-### 🎵 音频提取 (MP3)
-- 一键提取视频中的音频
-- 保存为 MP3 格式
-- 无需 Cookies 即可提取
+## 🚀 快速开始
 
-### 📝 ASR 语音转文字
-- 使用 **faster-whisper** 语音识别引擎
-- **GPU 加速**：支持 NVIDIA CUDA 加速，识别速度提升 4 倍
-- **双格式输出**：文字稿(.txt) + 字幕(.srt)
-- **多模型选择**：tiny / base / small / medium
+### 环境要求
+- Python 3.10+
+- ffmpeg（音视频处理必需）
+- NVIDIA CUDA（GPU加速可选）
 
-### 📊 模型推荐
+### 安装步骤
 
-| 模型 | 显存需求 | 推荐场景 |
-|------|---------|---------|
-| small | ~2GB | **推荐首选**，速度快，中文效果好 |
-| medium | ~5GB | 高精度，适合对准确率要求高的场景 |
-
----
-
-## 🛠️ 技术栈
-
-| 技术 | 说明 |
-|------|------|
-| Python 3.10+ | 编程语言 |
-| tkinter | GUI 图形界面 |
-| yt-dlp | 视频下载核心引擎 |
-| faster-whisper | ASR 语音识别（CTranslate2 优化） |
-| CUDA | GPU 加速支持 |
-
----
-
-## 📥 安装说明
-
-### 1. 环境要求
-
-- **Python 3.10+**
-- **ffmpeg**（音视频处理必需）
-- **NVIDIA CUDA**（GPU 加速可选，推荐）
-
-### 2. 安装步骤
-
-#### 安装 Python 依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-或者手动安装：
-
+1. **安装Python依赖**
 ```bash
 pip install yt-dlp requests pyperclip faster-whisper
 ```
 
-#### 安装 ffmpeg（必须）
-
-**Windows（winget 推荐）：**
+2. **安装ffmpeg**
 ```bash
+# Windows
 winget install ffmpeg
-```
 
-**Windows（Chocolatey）：**
-```bash
-choco install ffmpeg
-```
-
-**Windows（手动安装）：**
-1. 访问 https://ffmpeg.org/download.html
-2. 下载 Windows 构建版本
-3. 解压到任意目录（如 `C:\ffmpeg`）
-4. 将 bin 目录添加到系统 PATH
-
-**macOS：**
-```bash
+# macOS
 brew install ffmpeg
-```
 
-**Linux：**
-```bash
+# Linux
 sudo apt install ffmpeg
 ```
 
-#### 验证安装
-
-```bash
-ffmpeg -version
-python video_downloader.py
-```
-
----
-
-## 📋 依赖列表
-
-```
-yt-dlp>=2024.0.0      # 视频下载引擎
-requests>=2.28.0      # HTTP 请求库
-pyperclip>=1.8.0      # 剪贴板监控
-faster-whisper>=1.2.0 # ASR 语音识别
-```
-
----
-
-## 🚀 使用方法
-
-### 启动程序
-
+3. **运行程序**
 ```bash
 python video_downloader.py
 ```
 
-### 界面说明
+## 📖 使用方法
 
-程序包含两个主要标签页：
+### 视频下载
+1. 复制视频链接
+2. 程序自动检测并下载
+3. 下载完成后自动保存到 `downloads` 目录
 
-1. **视频下载** - 剪贴板监控模式
-   - 启动后自动监控剪贴板
-   - 检测到支持的链接后自动下载
-   - 视频和音频分别保存
+### 音频提取
+1. 复制视频链接
+2. 点击"提取音频"按钮
+3. 自动提取MP3格式音频
 
-2. **音频转文字** - ASR 功能
-   - 可上传本地音频文件
-   - 也可直接输入视频链接
-   - 选择识别模型（推荐 small）
-   - 点击开始识别，自动输出 txt 和 srt 文件
+### 语音转文字 (ASR)
+1. 选择"音频转文字"标签页
+2. 上传音频文件或输入视频链接
+3. 选择识别模型
+4. 点击"开始识别"
 
-### 支持的链接格式
+### 设备选择
+程序支持三种运行设备模式：
+- **Auto** - 自动检测GPU可用性，优先使用GPU
+- **GPU** - 强制使用GPU加速（需NVIDIA CUDA）
+- **CPU** - 使用CPU运行（兼容性更好）
 
-| 平台 | 示例链接 |
-|------|---------|
-| 抖音 | `https://v.douyin.com/xxxxx` |
-| B站 | `https://www.bilibili.com/video/BVxxxxx` |
-| 小红书 | `https://www.xiaohongshu.com/explore/xxxxx` |
-| 快手 | `https://v.kuaishou.com/xxxxx` |
+## 🤖 Whisper模型选择
 
----
+| 模型 | 大小 | 显存 | 推荐度 | 适用场景 |
+|------|------|------|--------|----------|
+| tiny | 39M | ~1GB | ⭐ 快速测试 | 快速预览 |
+| base | 74M | ~1GB | ⭐⭐ 基础识别 | 日常使用 |
+| small | 244M | ~2GB | ⭐⭐⭐ **推荐** | 最佳性价比 |
+| medium | 769M | ~5GB | ⭐⭐⭐⭐ 高精度 | 专业场景 |
 
-## 📁 项目结构
+首次使用会自动下载模型（约500MB-3GB）
 
-```
-video-downloader/
-├── video_downloader.py    # 主程序
-├── requirements.txt       # Python 依赖
-├── 安装说明.md             # 安装指南
-├── 更新日志.md             # 版本更新记录
-├── icon.ico                # 程序图标
-├── 启动.bat                # Windows 快速启动
-└── 安装依赖.bat            # Windows 一键安装依赖
-```
+## 🔧 配置说明
 
----
+### 抖音Cookies配置（如需下载抖音视频）
+1. 登录抖音网页版
+2. 使用浏览器扩展（如EditThisCookie）导出Cookies为JSON格式
+3. 保存为 `cookies.json` 放在程序同目录
 
-## ⚠️ 常见问题
+## 📋 更新日志
 
-### Q: 下载失败怎么办？
-- 检查网络连接
-- 确保 ffmpeg 已正确安装
-- 抖音视频可能需要更新 Cookies
+### v4.3 (2025-05)
+- 🔧 **修复链接ASR文字稿保存路径** - 现在自动保存到 `downloads/文字稿/` 文件夹，不再保存到临时目录
+- 🎛️ **新增设备选择下拉框** - 支持手动切换运行设备（Auto/GPU/CPU）
+- ⚡ **改进CUDA检测逻辑** - 检测顺序优化：nvidia-smi → pip nvidia-cublas → torch.cuda → cublas dll
+- 🎯 **GPU模式float32精度** - 避免RTX新架构float16精度问题导致乱码
+- 🌍 **HuggingFace镜像提前设置** - 程序启动时即设置镜像，解决模型下载超时
+- 🔒 **禁用xet传输协议** - 强制HTTPS走国内镜像
+- 📦 **自动配置PATH** - 自动将pip安装的nvidia-cublas DLL目录加入PATH
+- 🔍 **实时CUDA检测** - 选GPU时实时检测，不再使用启动缓存值
 
-### Q: ASR 模型下载超时？
-- v4.1 已添加 HuggingFace 国内镜像
-- 如仍有问题，检查网络代理设置
+### v4.2 (2025-01)
+- 🔐 **新增抖音Cookies认证** - 解决"Fresh cookies needed"问题
 
-### Q: GPU 加速不生效？
-- 确保已安装 NVIDIA CUDA 12.x
-- 确保 cuDNN 已正确配置
-- 检查 `nvidia-smi` 是否能识别显卡
+### v4.1 (2025-01)
+- 🌍 **HuggingFace国内镜像** - 新增hf-mirror.com镜像源
+- 🎵 **链接ASR音频优化** - 只下载音频流，大幅节省时间和存储
+- 🧹 **临时文件自动清理** - ASR完成后自动删除临时文件
 
----
+### v4.0 (2025-01)
+- 🎤 **音频转文字功能** - faster-whisper语音识别
+- 支持输出txt文字稿和srt字幕双格式
 
-## 📄 许可证
+### v3.0 (2024)
+- 剪贴板监控模式，复制即下载
+- 支持抖音/B站/小红书/快手
 
-本项目仅供学习交流使用，请勿用于商业目的。
+## 📦 依赖项
 
----
+- `yt-dlp` - 视频下载核心
+- `faster-whisper` - 语音识别
+- `requests` - 网络请求
+- `pyperclip` - 剪贴板监控
+- `ffmpeg` - 音视频处理
 
-## 📧 反馈与支持
+## ⚠️ 注意事项
 
-如有问题或建议，请提交 Issue。
+- 抖音视频下载需要Cookies认证
+- faster-whisper需要NVIDIA CUDA支持（可选CPU模式）
+- Windows用户需安装Visual Studio Build Tools
+
+## 📄 License
+
+MIT License

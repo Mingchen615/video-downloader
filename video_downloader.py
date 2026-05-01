@@ -6,13 +6,19 @@
 支持功能：视频下载、音频提取、ASR语音识别
 
 作者：AI Assistant
-版本：v4.1 - HF镜像+链接ASR音频优化+临时文件清理
+版本：v4.3 - 修复链接ASR文字稿保存路径；新增设备选择下拉框；改进GPU检测逻辑
 
 更新说明：
+- v4.3: 修复链接ASR文字稿保存到临时目录的问题；新增设备选择（Auto/GPU/CPU）；改进CUDA检测逻辑
+- v4.2: 新增抖音Cookies认证支持，解决"Fresh cookies needed"问题
 - v4.1: 新增HF国内镜像，修复模型下载超时；链接ASR只下载音频流；临时文件自动清理
 - v4.0: 新增音频转文字功能，支持faster-whisper语音识别
 - v3.0: 全新剪贴板监控模式，复制即下载
-- v2.4: 修复抖音音频提取问题，无需cookies
+- v2.4: 修复抖音音频提取问题
+
+注意事项：
+- 抖音视频下载需要Cookies认证，请将cookies.json文件放在脚本同目录下
+- Cookies获取方法：浏览器登录抖音后，使用EditThisCookie等扩展导出为JSON格式
 """
 
 import tkinter as tk
@@ -26,6 +32,7 @@ import webbrowser
 import json
 import requests
 import tempfile
+import shutil
 from datetime import datetime
 
 # 尝试导入yt-dlp
@@ -70,10 +77,96 @@ class ASREngine:
         self.model = None
         self.current_model_name = None
         self.model_lock = threading.Lock()
+        self.current_device = None
+        self.current_compute_type = None
     
-    def load_model(self, model_size='small', progress_callback=None):
-        """加载ASR模型"""
-        if self.model is not None and self.current_model_name == model_size:
+    @staticmethod
+    def check_cuda_available():
+        """
+        改进的CUDA检测逻辑
+        检测顺序：nvidia-smi -> pip安装的nvidia-cublas -> torch.cuda -> ctypes检测cublas
+        """
+        # 方法1：检查nvidia-smi命令（最可靠，只要有N卡驱动就行）
+        try:
+            result = subprocess.run(
+                ['nvidia-smi'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        
+        # 方法2：检查pip安装的nvidia-cublas-cu12包
+        try:
+            import nvidia.cublas
+            return True
+        except ImportError:
+            pass
+        
+        # 方法3：检查torch.cuda
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return True
+        except ImportError:
+            pass
+        
+        # 方法4：尝试ctypes加载cublas（支持多版本）
+        try:
+            import ctypes
+            for dll_name in ['cublas64_12.dll', 'cublas64_11.dll', 'cublas64_10.dll']:
+                try:
+                    ctypes.CDLL(dll_name)
+                    return True
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+        
+        return False
+    
+    def load_model(self, model_size='small', progress_callback=None, device='auto'):
+        """
+        加载ASR模型
+        
+        Args:
+            model_size: 模型大小 (tiny/base/small/medium)
+            progress_callback: 进度回调函数
+            device: 设备选择 'auto'/'gpu'/'cpu'
+        """
+        # 检查设备选择
+        cuda_available = self.check_cuda_available()
+        
+        if device == 'cpu':
+            # 强制使用CPU
+            use_device = 'cpu'
+            use_compute_type = 'int8'
+        elif device == 'gpu':
+            # 强制使用GPU
+            if not cuda_available:
+                raise Exception("未检测到CUDA支持。请确保已安装CUDA toolkit。\n\n"
+                              "安装方法：\n1. 访问 https://developer.nvidia.com/cuda-downloads\n2. 下载并安装CUDA Toolkit\n3. 重启电脑后重新运行程序")
+            use_device = 'cuda'
+            use_compute_type = 'float32'  # float32精度更高，避免新显卡float16精度问题
+        else:
+            # auto模式
+            if cuda_available:
+                use_device = 'cuda'
+                use_compute_type = 'float32'
+            else:
+                use_device = 'cpu'
+                use_compute_type = 'int8'
+                if progress_callback:
+                    progress_callback(0, "未检测到CUDA，使用CPU模式（较慢但可用）")
+        
+        # 如果设备或计算类型没变，不需要重新加载
+        if (self.model is not None and 
+            self.current_model_name == model_size and
+            self.current_device == use_device and
+            self.current_compute_type == use_compute_type):
             return True
         
         try:
@@ -85,22 +178,30 @@ class ASREngine:
             
             # 设置HuggingFace国内镜像，解决国内网络超时问题
             os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+            # 关闭符号链接警告
+            os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS_WARNING', '1')
+            # 禁用xet传输协议（国内CDN连不上），强制用普通HTTPS走镜像
+            os.environ.setdefault('HF_HUB_ENABLE_HF_TRANSFER', '0')
             
-            # 根据可用显存选择计算类型
-            compute_type = "float16"  # GPU float16
+            device_desc = "GPU" if use_device == "cuda" else "CPU"
+            if progress_callback:
+                progress_callback(0, f"使用{device_desc}设备 (compute_type={use_compute_type})...")
             
             # 加载模型
             self.model = WhisperModel(
                 model_size,
-                device="cuda",
-                compute_type=compute_type,
-                download_root=None  # 使用默认缓存目录
+                device=use_device,
+                compute_type=use_compute_type,
+                download_root=None,
+                cpu_threads=4 if use_device == "cpu" else 0
             )
             
             self.current_model_name = model_size
+            self.current_device = use_device
+            self.current_compute_type = use_compute_type
             
             if progress_callback:
-                progress_callback(100, f"模型 {model_size} 加载完成")
+                progress_callback(100, f"模型 {model_size} 加载完成（{device_desc}）")
             
             return True
             
@@ -109,7 +210,7 @@ class ASREngine:
         except Exception as e:
             raise Exception(f"模型加载失败: {str(e)}")
     
-    def transcribe(self, audio_path, model_size='small', progress_callback=None, language='zh'):
+    def transcribe(self, audio_path, model_size='small', progress_callback=None, language='zh', device='auto'):
         """
         音频转文字
         
@@ -118,6 +219,7 @@ class ASREngine:
             model_size: 模型大小 (tiny/base/small/medium)
             progress_callback: 进度回调函数
             language: 语言代码，'zh'为中文
+            device: 设备选择 'auto'/'gpu'/'cpu'
         
         Returns:
             dict: {
@@ -132,9 +234,9 @@ class ASREngine:
         if progress_callback:
             progress_callback(0, "开始识别...")
         
-        # 确保模型已加载
+        # 确保模型已加载，传入device参数
         if self.model is None or self.current_model_name != model_size:
-            self.load_model(model_size, progress_callback)
+            self.load_model(model_size, progress_callback, device)
         
         try:
             # 执行转写
@@ -369,6 +471,7 @@ class DouyinDownloader:
     def download_video(self, url, save_path, progress_callback=None):
         """下载抖音视频"""
         info = self.get_video_info(url)
+        
         if not info:
             raise Exception("无法获取视频信息，请稍后重试或检查链接是否正确")
         
@@ -446,6 +549,10 @@ class VideoDownloader:
         self.douyin_downloader = DouyinDownloader()
         self.ffmpeg_available = self._check_ffmpeg()
         self.asr_engine = ASREngine()
+        
+        # Cookies文件路径（用于抖音等需要认证的平台）
+        self.cookies_path = os.path.join(self.script_dir, "cookies.json")
+        self._has_cookies = os.path.exists(self.cookies_path)
     
     def _check_ffmpeg(self):
         """检查ffmpeg是否可用"""
@@ -519,38 +626,60 @@ class VideoDownloader:
         return self._download_audio_ytdlp(url, progress_callback)
     
     def download_audio_only(self, url, progress_callback=None):
-        """只下载音频用于ASR识别，保存到临时目录，识别后自动清理"""
+        """只下载音频用于ASR识别，保存到临时目录，识别后自动清理
+        抖音用DouyinDownloader（不需要cookies），其他平台用yt-dlp"""
         import tempfile
         temp_dir = tempfile.mkdtemp(prefix="asr_")
         platform = self.detect_platform(url)
         
         try:
             if platform == '抖音':
+                # 抖音用DouyinDownloader，不需要cookies
                 info = self.douyin_downloader.get_video_info(url)
-                if not info:
-                    raise Exception("无法获取抖音视频信息")
+                if not info or not info.get('video_url'):
+                    raise Exception("无法获取抖音视频信息，请检查链接是否正确")
+                
                 video_title = info['title']
                 clean_title = self.clean_filename(video_title)
                 temp_video_path = os.path.join(temp_dir, f"temp_{os.getpid()}.mp4")
                 audio_output = os.path.join(temp_dir, f"{clean_title}.mp3")
                 
-                self.douyin_downloader._download_file(info['video_url'], temp_video_path, 
-                    lambda p, d, t: progress_callback(p * 0.8, d, t) if progress_callback else None)
+                if progress_callback:
+                    progress_callback(0, 0, 0, "正在下载抖音视频...")  # (percent, downloaded, total, message)
+                
+                def download_progress_cb(p, d, t):
+                    if progress_callback:
+                        progress_callback(p * 0.7, d, t, f"下载进度: {p:.1f}%")
+                
+                self.douyin_downloader._download_file(
+                    info['video_url'], temp_video_path, download_progress_cb
+                )
                 
                 if self.ffmpeg_available:
+                    if progress_callback:
+                        progress_callback(70, 0, 0, "正在提取音频...")
                     subprocess.run([
                         'ffmpeg', '-i', temp_video_path,
                         '-vn', '-acodec', 'libmp3lame', '-ab', '192k', '-y', audio_output
                     ], check=True, capture_output=True)
+                    # 删除临时视频，只留音频
                     if os.path.exists(temp_video_path):
                         os.remove(temp_video_path)
-                    return {'success': True, 'title': video_title, 'file_path': audio_output}
+                    if progress_callback:
+                        progress_callback(100, 100, 100, "音频提取完成")
+                    return {'success': True, 'title': video_title, 'file_path': audio_output, 'temp_dir': temp_dir}
                 else:
                     # 没有ffmpeg就直接用mp4识别
-                    return {'success': True, 'title': video_title, 'file_path': temp_video_path}
+                    if progress_callback:
+                        progress_callback(100, 100, 100, "下载完成")
+                    return {'success': True, 'title': video_title, 'file_path': temp_video_path, 'temp_dir': temp_dir}
             else:
+                # 其他平台用yt-dlp
+                if not self.ffmpeg_available:
+                    raise Exception("音频提取需要ffmpeg，请先安装ffmpeg")
+                
                 info = self._get_video_info_basic(url)
-                video_title = info['title']
+                video_title = info.get('title', 'unknown')
                 clean_title = self.clean_filename(video_title)
                 output_path = os.path.join(temp_dir, f"{clean_title}.%(ext)s")
                 
@@ -561,22 +690,42 @@ class VideoDownloader:
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
                         'preferredquality': '192',
-                    }] if self.ffmpeg_available else [],
+                    }],
                     'quiet': True,
                     'no_warnings': True,
                     'progress_hooks': [],
                     'no_check_certificate': True,
                 }
                 
+                # 抖音等平台需要cookies认证
+                if self._has_cookies:
+                    ydl_opts['cookiefile'] = self.cookies_path
+                
                 if progress_callback:
-                    ydl_opts['progress_hooks'].append(lambda d: self._audio_progress_hook(d, progress_callback))
+                    def ytdlp_progress_adapter(d):
+                        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                        downloaded = d.get('downloaded_bytes', 0)
+                        if total > 0:
+                            percent = (downloaded / total) * 100
+                            if d['status'] == 'downloading':
+                                progress_callback(percent * 0.7, downloaded, total, f"下载进度: {percent:.1f}%")
+                            elif d['status'] == 'finished':
+                                progress_callback(70, 0, 0, "正在提取音频...")
+                        else:
+                            progress_callback(0, 0, 0, "下载中...")
+                    ydl_opts['progress_hooks'].append(ytdlp_progress_adapter)
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
                 
-                # 查找生成的文件
+                # 查找生成的MP3文件
                 for f in os.listdir(temp_dir):
-                    return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f)}
+                    if f.endswith('.mp3'):
+                        return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f), 'temp_dir': temp_dir}
+                
+                # 没有MP3就找任意音频文件
+                for f in os.listdir(temp_dir):
+                    return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f), 'temp_dir': temp_dir}
                 
                 raise Exception("音频下载失败：未找到输出文件")
         except Exception as e:
@@ -677,6 +826,10 @@ class VideoDownloader:
             'merge_output_format': 'mp4',
         }
         
+        # 抖音等平台需要cookies认证
+        if self._has_cookies:
+            ydl_opts['cookiefile'] = self.cookies_path
+        
         if progress_callback:
             ydl_opts['progress_hooks'].append(lambda d: self._progress_hook(d, progress_callback))
         
@@ -723,6 +876,10 @@ class VideoDownloader:
             'no_check_certificate': True,
         }
         
+        # 抖音等平台需要cookies认证
+        if self._has_cookies:
+            ydl_opts['cookiefile'] = self.cookies_path
+        
         if progress_callback:
             ydl_opts['progress_hooks'].append(lambda d: self._audio_progress_hook(d, progress_callback))
         
@@ -763,6 +920,10 @@ class VideoDownloader:
             'skip_download': True,
         }
         
+        # 抖音等平台需要cookies认证
+        if self._has_cookies:
+            ydl_opts['cookiefile'] = self.cookies_path
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -776,7 +937,7 @@ class VideoDownloader:
                 'platform': self.detect_platform(url)
             }
     
-    def transcribe_file(self, file_path, model_size='small', progress_callback=None, language='zh'):
+    def transcribe_file(self, file_path, model_size='small', progress_callback=None, language='zh', device='auto'):
         """
         转写音频/视频文件为文字
         
@@ -785,6 +946,7 @@ class VideoDownloader:
             model_size: 模型大小
             progress_callback: 进度回调
             language: 语言
+            device: 设备选择 'auto'/'gpu'/'cpu'
         
         Returns:
             dict: 转写结果
@@ -820,7 +982,8 @@ class VideoDownloader:
                     temp_audio,
                     model_size=model_size,
                     progress_callback=lambda p, m: progress_callback(p * 0.3 + 10, m) if progress_callback else None,
-                    language=language
+                    language=language,
+                    device=device
                 )
                 
                 # 将结果中的临时路径替换为原视频路径
@@ -849,11 +1012,49 @@ class VideoDownloader:
                 file_path,
                 model_size=model_size,
                 progress_callback=progress_callback,
-                language=language
+                language=language,
+                device=device
             )
         
         else:
             raise Exception(f"不支持的文件格式: {file_ext}，支持 mp3/wav/m4a/mp4 等")
+    
+    def move_asr_files_to_text_dir(self, txt_path, srt_path, title):
+        """
+        将ASR生成的txt和srt文件移动到文字稿目录
+        
+        Args:
+            txt_path: 文字稿文件路径
+            srt_path: 字幕文件路径
+            title: 标题（用于命名）
+        
+        Returns:
+            dict: {'txt_path': new_txt_path, 'srt_path': new_srt_path}
+        """
+        clean_title = self.clean_filename(title)
+        
+        new_txt_path = os.path.join(self.text_dir, f"{clean_title}_文字稿.txt")
+        new_srt_path = os.path.join(self.text_dir, f"{clean_title}_字幕.srt")
+        
+        # 处理重名
+        counter = 1
+        while os.path.exists(new_txt_path):
+            new_txt_path = os.path.join(self.text_dir, f"{clean_title}_文字稿_{counter}.txt")
+            counter += 1
+        
+        counter = 1
+        while os.path.exists(new_srt_path):
+            new_srt_path = os.path.join(self.text_dir, f"{clean_title}_字幕_{counter}.srt")
+            counter += 1
+        
+        # 移动文件
+        if txt_path and os.path.exists(txt_path):
+            shutil.move(txt_path, new_txt_path)
+        
+        if srt_path and os.path.exists(srt_path):
+            shutil.move(srt_path, new_srt_path)
+        
+        return {'txt_path': new_txt_path, 'srt_path': new_srt_path}
 
 
 # ==================== GUI 界面 ====================
@@ -868,10 +1069,13 @@ class ClipboardMonitorGUI:
         self.check_timer = None
         self.asr_task_running = False
         
+        # 初始化CUDA检测结果
+        self.cuda_available = ASREngine.check_cuda_available()
+        
         self.root = tk.Tk()
-        self.root.title("短视频无水印下载器 v4.0 - 剪贴板监控版 + ASR")
-        self.root.geometry("750x650")
-        self.root.minsize(700, 550)
+        self.root.title("短视频无水印下载器 v4.3 - 剪贴板监控版 + ASR")
+        self.root.geometry("750x680")
+        self.root.minsize(700, 580)
         self.root.resizable(True, True)
         
         self.setup_ui()
@@ -906,7 +1110,7 @@ class ClipboardMonitorGUI:
         ttk.Label(title_frame, text="作者：铭晨 Vx：MingCv1", font=("微软雅黑", 9), foreground="gray").pack(anchor=tk.W)
         title_label.pack(side=tk.LEFT)
         
-        version_label = ttk.Label(title_frame, text="v4.0", foreground="gray", font=("微软雅黑", 10))
+        version_label = ttk.Label(title_frame, text="v4.3", foreground="gray", font=("微软雅黑", 10))
         version_label.pack(side=tk.RIGHT, pady=10)
         
         # 监控状态区域
@@ -987,7 +1191,7 @@ class ClipboardMonitorGUI:
 • 方式一：选择本地音频/视频文件进行转文字
 • 方式二：输入视频链接，自动下载并转文字
 • 支持格式：MP3、WAV、M4A、MP4、AVI等
-• 输出结果：文字稿(.txt) + 字幕(.srt)
+• 输出结果：文字稿(.txt) + 字幕(.srt) -> 保存到"文字稿"文件夹
         """
         ttk.Label(info_frame, text=info_text.strip(), font=("微软雅黑", 9), justify=tk.LEFT).pack(anchor=tk.W)
         
@@ -1049,6 +1253,35 @@ class ClipboardMonitorGUI:
         )
         lang_combo.pack(side=tk.LEFT, padx=5)
         
+        # 设备选择（新增）
+        device_frame = ttk.Frame(model_frame)
+        device_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Label(device_frame, text="运行设备：").pack(side=tk.LEFT)
+        
+        # 检测CUDA状态并设置默认值
+        if self.cuda_available:
+            default_device = 'auto'
+            cuda_hint = f"✅ 检测到CUDA支持（推荐GPU加速）"
+            cuda_hint_color = "#4CAF50"
+        else:
+            default_device = 'cpu'
+            cuda_hint = "⚠️ 未检测到CUDA，将使用CPU模式"
+            cuda_hint_color = "#FF9800"
+        
+        self.asr_device_var = tk.StringVar(value=default_device)
+        device_combo = ttk.Combobox(
+            device_frame,
+            textvariable=self.asr_device_var,
+            values=[('auto', 'Auto (自动)'), ('gpu', 'GPU (加速)'), ('cpu', 'CPU (兼容)')],
+            state='readonly',
+            width=18
+        )
+        device_combo.pack(side=tk.LEFT, padx=5)
+        
+        self.cuda_hint_label = ttk.Label(device_frame, text=cuda_hint, foreground=cuda_hint_color)
+        self.cuda_hint_label.pack(side=tk.LEFT, padx=10)
+        
         # 开始按钮
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1071,7 +1304,7 @@ class ClipboardMonitorGUI:
         self.asr_log = scrolledtext.ScrolledText(
             log_frame, wrap=tk.WORD, font=("Consolas", 10),
             relief=tk.FLAT, bg="#1E1E1E", fg="#00FF00",
-            height=12
+            height=10
         )
         self.asr_log.pack(fill=tk.BOTH, expand=True)
         self.asr_log.tag_configure("info", foreground="#00FF00")
@@ -1086,7 +1319,7 @@ class ClipboardMonitorGUI:
         self.asr_result = scrolledtext.ScrolledText(
             result_frame, wrap=tk.WORD, font=("微软雅黑", 10),
             relief=tk.FLAT, bg="#F5F5F5",
-            height=6
+            height=5
         )
         self.asr_result.pack(fill=tk.BOTH, expand=True)
     
@@ -1112,6 +1345,32 @@ class ClipboardMonitorGUI:
         file_path = self.asr_file_path.get().strip()
         link = self.asr_link.get().strip()
         
+        # 检查设备选择（实时检测CUDA，不用缓存值）
+        device = self.asr_device_var.get()
+        if device == 'gpu':
+            cuda_now = ASREngine.check_cuda_available()
+            if not cuda_now:
+                messagebox.showwarning(
+                    "CUDA不可用",
+                    "未检测到CUDA支持。\n\n"
+                    "如果您想使用GPU加速，请：\n"
+                    "1. 确保已安装NVIDIA显卡驱动\n"
+                    "2. pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
+                    "3. 重启程序\n\n"
+                    "程序将使用CPU模式继续运行。"
+                )
+                device = 'cpu'
+            else:
+                # 更新缓存
+                self.cuda_available = True
+        
+        # 自动从分享文本中提取链接
+        if link and not link.startswith('http'):
+            import re as _re
+            url_match = _re.search(r'https?://[^\s<>"\']+', link)
+            if url_match:
+                link = url_match.group(0)
+        
         if not file_path and not link:
             messagebox.showwarning("提示", "请选择文件或输入视频链接")
             return
@@ -1121,12 +1380,13 @@ class ClipboardMonitorGUI:
         self.asr_progress_var.set("准备中...")
         self.asr_result.delete(1.0, tk.END)
         
-        thread = threading.Thread(target=self._asr_task, args=(file_path, link))
+        thread = threading.Thread(target=self._asr_task, args=(file_path, link, device))
         thread.daemon = True
         thread.start()
     
-    def _asr_task(self, file_path, link):
+    def _asr_task(self, file_path, link, device):
         """ASR转写任务（在线程中运行）"""
+        temp_dir = None  # 记录临时目录
         try:
             model_size = self.asr_model_var.get()
             language = self.asr_lang_var.get()
@@ -1138,19 +1398,22 @@ class ClipboardMonitorGUI:
                 self.root.after(0, lambda: self._asr_log(message, tag))
             
             progress_callback(0, "正在处理...")
-            log_callback("开始语音识别...", "info")
+            device_desc = "GPU" if device == "gpu" else ("CPU" if device == "cpu" else "Auto")
+            log_callback(f"开始语音识别... (设备: {device_desc}, 模型: {model_size})", "info")
             
+            audio_result = None
             if link:
                 # 从链接只下载音频流（不下载视频，节省存储）
                 log_callback(f"📥 正在提取音频：{link[:50]}...", "info")
                 
                 audio_result = self.downloader.download_audio_only(
                     link,
-                    progress_callback=lambda p, d, t: self.root.after(0, lambda: self._asr_log(f"   下载进度: {p:.1f}%", "info"))
+                    progress_callback=lambda p, d, t, msg: self.root.after(0, lambda: self._asr_log(f"   {msg} ({p:.1f}%)", "info"))
                 )
                 
                 if audio_result.get('file_path') and os.path.exists(audio_result['file_path']):
                     file_path = audio_result['file_path']
+                    temp_dir = audio_result.get('temp_dir')
                     log_callback(f"✅ 音频提取完成：{os.path.basename(file_path)}", "success")
                 else:
                     raise Exception("音频提取失败")
@@ -1160,12 +1423,13 @@ class ClipboardMonitorGUI:
             
             log_callback(f"🎤 开始识别：{os.path.basename(file_path)}", "info")
             
-            # 执行转写
+            # 执行转写，传入device参数
             result = self.downloader.transcribe_file(
                 file_path,
                 model_size=model_size,
                 progress_callback=progress_callback,
-                language=language
+                language=language,
+                device=device
             )
             
             if result['success']:
@@ -1173,19 +1437,49 @@ class ClipboardMonitorGUI:
                 log_callback(f"✅ 识别完成！", "success")
                 log_callback(f"📄 语言：{result['language']} (概率: {result['language_prob']:.1%})", "success")
                 log_callback(f"⏱️ 时长：{result['duration']:.1f} 秒", "success")
+                
+                # 如果是通过链接下载的，需要移动txt和srt文件到文字稿目录
+                title = audio_result['title'] if audio_result else os.path.splitext(os.path.basename(file_path))[0]
+                
+                if link and temp_dir:
+                    # Bug修复：移动txt和srt文件到文字稿目录
+                    txt_path = result.get('txt_path', '')
+                    srt_path = result.get('srt_path', '')
+                    
+                    if txt_path and os.path.exists(txt_path):
+                        try:
+                            moved_paths = self.downloader.move_asr_files_to_text_dir(
+                                txt_path, srt_path, title
+                            )
+                            result['txt_path'] = moved_paths['txt_path']
+                            result['srt_path'] = moved_paths['srt_path']
+                            log_callback(f"📂 文字稿已保存到：{self.downloader.text_dir}", "success")
+                        except Exception as e:
+                            log_callback(f"⚠️ 移动文件失败: {str(e)}", "warning")
+                
                 log_callback(f"📝 文字稿：{os.path.basename(result['txt_path'])}", "success")
                 log_callback(f"📝 字幕：{os.path.basename(result['srt_path'])}", "success")
                 log_callback("=" * 50, "success")
                 
                 # 如果是通过链接下载的临时音频，识别完后自动清理
                 if link and file_path and os.path.exists(file_path):
-                    temp_dir = os.path.dirname(file_path)
                     try:
                         os.remove(file_path)
-                        # 尝试清理空临时目录
-                        if temp_dir.startswith(tempfile.gettempdir()) and not os.listdir(temp_dir):
-                            os.rmdir(temp_dir)
-                        log_callback("🗑️ 临时音频已自动清理", "info")
+                        # 尝试清理临时目录
+                        if temp_dir and temp_dir.startswith(tempfile.gettempdir()):
+                            try:
+                                # 先删除可能残留的其他文件
+                                if os.path.exists(temp_dir):
+                                    for f in os.listdir(temp_dir):
+                                        try:
+                                            os.remove(os.path.join(temp_dir, f))
+                                        except:
+                                            pass
+                                    if not os.listdir(temp_dir):
+                                        os.rmdir(temp_dir)
+                            except:
+                                pass
+                        log_callback("🗑️ 临时文件已自动清理", "info")
                     except:
                         pass
                 
@@ -1270,7 +1564,7 @@ class ClipboardMonitorGUI:
         """开始监控剪贴板"""
         if not self.monitoring:
             return
-        
+            
         try:
             current = pyperclip.paste()
         except:
@@ -1403,10 +1697,37 @@ class ClipboardMonitorGUI:
 
 def main():
     """主函数"""
+    # 程序启动时立即设置HuggingFace环境变量（必须在import faster_whisper之前）
+    os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+    os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+    os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
+    
+    # 自动将pip安装的nvidia-cublas DLL加入PATH（解决cublas64_12.dll找不到的问题）
+    try:
+        import glob
+        import sys
+        # 搜索site-packages下所有nvidia DLL目录
+        site_candidates = []
+        if getattr(sys, 'frozen', False):
+            site_candidates.append(os.path.join(os.path.dirname(sys.executable), 'Lib', 'site-packages'))
+        else:
+            for sp in sys.path:
+                if sp.endswith('site-packages') and os.path.isdir(sp):
+                    site_candidates.append(sp)
+        
+        for site_dir in site_candidates:
+            # 匹配 nvidia/cublas/lib或bin、nvidia/cudnn/lib或bin 等目录
+            for subpath in ['lib', 'bin']:
+                for dll_dir in glob.glob(os.path.join(site_dir, 'nvidia', '*', subpath)):
+                    if os.path.isdir(dll_dir) and any(f.endswith('.dll') for f in os.listdir(dll_dir)):
+                        os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+    except Exception:
+        pass
+    
     print("=" * 50)
-    print("短视频无水印下载器 v4.0")
+    print("短视频无水印下载器 v4.3")
     print("支持：抖音 | B站 | 小红书 | 快手")
-    print("新增功能：音频转文字 (ASR)")
+    print("新增功能：音频转文字 (ASR) + GPU加速支持")
     print("=" * 50)
     
     try:
