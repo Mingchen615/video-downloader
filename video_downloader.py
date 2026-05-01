@@ -6,9 +6,10 @@
 支持功能：视频下载、音频提取、ASR语音识别
 
 作者：AI Assistant
-版本：v4.0 - 新增音频转文字(ASR)功能
+版本：v4.1 - HF镜像+链接ASR音频优化+临时文件清理
 
 更新说明：
+- v4.1: 新增HF国内镜像，修复模型下载超时；链接ASR只下载音频流；临时文件自动清理
 - v4.0: 新增音频转文字功能，支持faster-whisper语音识别
 - v3.0: 全新剪贴板监控模式，复制即下载
 - v2.4: 修复抖音音频提取问题，无需cookies
@@ -81,6 +82,9 @@ class ASREngine:
             
             if progress_callback:
                 progress_callback(0, f"正在加载模型 {model_size}...")
+            
+            # 设置HuggingFace国内镜像，解决国内网络超时问题
+            os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
             
             # 根据可用显存选择计算类型
             compute_type = "float16"  # GPU float16
@@ -513,6 +517,70 @@ class VideoDownloader:
             return self._download_audio_douyin(url, progress_callback)
         
         return self._download_audio_ytdlp(url, progress_callback)
+    
+    def download_audio_only(self, url, progress_callback=None):
+        """只下载音频用于ASR识别，保存到临时目录，识别后自动清理"""
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix="asr_")
+        platform = self.detect_platform(url)
+        
+        try:
+            if platform == '抖音':
+                info = self.douyin_downloader.get_video_info(url)
+                if not info:
+                    raise Exception("无法获取抖音视频信息")
+                video_title = info['title']
+                clean_title = self.clean_filename(video_title)
+                temp_video_path = os.path.join(temp_dir, f"temp_{os.getpid()}.mp4")
+                audio_output = os.path.join(temp_dir, f"{clean_title}.mp3")
+                
+                self.douyin_downloader._download_file(info['video_url'], temp_video_path, 
+                    lambda p, d, t: progress_callback(p * 0.8, d, t) if progress_callback else None)
+                
+                if self.ffmpeg_available:
+                    subprocess.run([
+                        'ffmpeg', '-i', temp_video_path,
+                        '-vn', '-acodec', 'libmp3lame', '-ab', '192k', '-y', audio_output
+                    ], check=True, capture_output=True)
+                    if os.path.exists(temp_video_path):
+                        os.remove(temp_video_path)
+                    return {'success': True, 'title': video_title, 'file_path': audio_output}
+                else:
+                    # 没有ffmpeg就直接用mp4识别
+                    return {'success': True, 'title': video_title, 'file_path': temp_video_path}
+            else:
+                info = self._get_video_info_basic(url)
+                video_title = info['title']
+                clean_title = self.clean_filename(video_title)
+                output_path = os.path.join(temp_dir, f"{clean_title}.%(ext)s")
+                
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': output_path,
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }] if self.ffmpeg_available else [],
+                    'quiet': True,
+                    'no_warnings': True,
+                    'progress_hooks': [],
+                    'no_check_certificate': True,
+                }
+                
+                if progress_callback:
+                    ydl_opts['progress_hooks'].append(lambda d: self._audio_progress_hook(d, progress_callback))
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # 查找生成的文件
+                for f in os.listdir(temp_dir):
+                    return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f)}
+                
+                raise Exception("音频下载失败：未找到输出文件")
+        except Exception as e:
+            raise Exception(f"音频提取失败：{str(e)}")
     
     def _download_douyin(self, url, progress_callback=None):
         """下载抖音视频"""
@@ -1073,20 +1141,19 @@ class ClipboardMonitorGUI:
             log_callback("开始语音识别...", "info")
             
             if link:
-                # 从链接下载并转写
-                log_callback(f"📥 正在下载视频：{link[:50]}...", "info")
+                # 从链接只下载音频流（不下载视频，节省存储）
+                log_callback(f"📥 正在提取音频：{link[:50]}...", "info")
                 
-                # 下载视频
-                video_result = self.downloader.download_video(
+                audio_result = self.downloader.download_audio_only(
                     link,
                     progress_callback=lambda p, d, t: self.root.after(0, lambda: self._asr_log(f"   下载进度: {p:.1f}%", "info"))
                 )
                 
-                if video_result.get('file_path') and os.path.exists(video_result['file_path']):
-                    file_path = video_result['file_path']
-                    log_callback(f"✅ 视频下载完成：{os.path.basename(file_path)}", "success")
+                if audio_result.get('file_path') and os.path.exists(audio_result['file_path']):
+                    file_path = audio_result['file_path']
+                    log_callback(f"✅ 音频提取完成：{os.path.basename(file_path)}", "success")
                 else:
-                    raise Exception("视频下载失败")
+                    raise Exception("音频提取失败")
             
             if not file_path or not os.path.exists(file_path):
                 raise Exception(f"文件不存在：{file_path}")
@@ -1109,6 +1176,18 @@ class ClipboardMonitorGUI:
                 log_callback(f"📝 文字稿：{os.path.basename(result['txt_path'])}", "success")
                 log_callback(f"📝 字幕：{os.path.basename(result['srt_path'])}", "success")
                 log_callback("=" * 50, "success")
+                
+                # 如果是通过链接下载的临时音频，识别完后自动清理
+                if link and file_path and os.path.exists(file_path):
+                    temp_dir = os.path.dirname(file_path)
+                    try:
+                        os.remove(file_path)
+                        # 尝试清理空临时目录
+                        if temp_dir.startswith(tempfile.gettempdir()) and not os.listdir(temp_dir):
+                            os.rmdir(temp_dir)
+                        log_callback("🗑️ 临时音频已自动清理", "info")
+                    except:
+                        pass
                 
                 # 显示结果预览
                 preview_text = f"【识别结果预览】\n{result['text'][:500]}"
