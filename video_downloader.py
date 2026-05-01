@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-短视频无水印下载器 - 剪贴板监控版
+短视频无水印下载器 - 剪贴板监控版 + 音频转文字
 支持平台：抖音、B站、小红书、快手
+支持功能：视频下载、音频提取、ASR语音识别
 
 作者：AI Assistant
-版本：v3.0 - 剪贴板监控模式，复制即下载
+版本：v4.0 - 新增音频转文字(ASR)功能
 
 更新说明：
-- v3.0: 全新剪贴板监控模式，复制视频链接自动下载视频+音频
+- v4.0: 新增音频转文字功能，支持faster-whisper语音识别
+- v3.0: 全新剪贴板监控模式，复制即下载
 - v2.4: 修复抖音音频提取问题，无需cookies
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog, messagebox
 import threading
 import os
 import re
@@ -48,6 +50,177 @@ except ImportError:
     print("=" * 50)
 
 
+# ==================== ASR 语音识别模块 ====================
+class ASREngine:
+    """
+    音频转文字引擎
+    使用 faster-whisper 实现高效的语音识别
+    """
+    
+    # 模型配置：名称 -> (显存需求, 中文推荐度, 描述)
+    MODEL_CONFIGS = {
+        'tiny': {'vram': '~1GB', 'chinese': '★★★☆☆', 'desc': '极速，适合测试'},
+        'base': {'vram': '~1GB', 'chinese': '★★★☆☆', 'desc': '快速，基础识别'},
+        'small': {'vram': '~2GB', 'chinese': '★★★★☆', 'desc': '推荐，中文效果好'},
+        'medium': {'vram': '~5GB', 'chinese': '★★★★★', 'desc': '高精度，首选推荐'},
+    }
+    
+    def __init__(self):
+        self.model = None
+        self.current_model_name = None
+        self.model_lock = threading.Lock()
+    
+    def load_model(self, model_size='small', progress_callback=None):
+        """加载ASR模型"""
+        if self.model is not None and self.current_model_name == model_size:
+            return True
+        
+        try:
+            # 延迟导入，避免启动时卡顿
+            from faster_whisper import WhisperModel
+            
+            if progress_callback:
+                progress_callback(0, f"正在加载模型 {model_size}...")
+            
+            # 根据可用显存选择计算类型
+            compute_type = "float16"  # GPU float16
+            
+            # 加载模型
+            self.model = WhisperModel(
+                model_size,
+                device="cuda",
+                compute_type=compute_type,
+                download_root=None  # 使用默认缓存目录
+            )
+            
+            self.current_model_name = model_size
+            
+            if progress_callback:
+                progress_callback(100, f"模型 {model_size} 加载完成")
+            
+            return True
+            
+        except ImportError:
+            raise Exception("请先安装 faster-whisper: pip install faster-whisper")
+        except Exception as e:
+            raise Exception(f"模型加载失败: {str(e)}")
+    
+    def transcribe(self, audio_path, model_size='small', progress_callback=None, language='zh'):
+        """
+        音频转文字
+        
+        Args:
+            audio_path: 音频文件路径
+            model_size: 模型大小 (tiny/base/small/medium)
+            progress_callback: 进度回调函数
+            language: 语言代码，'zh'为中文
+        
+        Returns:
+            dict: {
+                'success': bool,
+                'text': str,  # 完整文本
+                'segments': list,  # 分段结果
+                'language': str,  # 检测到的语言
+                'duration': float,  # 音频时长
+                'save_path': str  # 保存路径
+            }
+        """
+        if progress_callback:
+            progress_callback(0, "开始识别...")
+        
+        # 确保模型已加载
+        if self.model is None or self.current_model_name != model_size:
+            self.load_model(model_size, progress_callback)
+        
+        try:
+            # 执行转写
+            if progress_callback:
+                progress_callback(10, "正在识别语音...")
+            
+            segments, info = self.model.transcribe(
+                audio_path,
+                language=language if language != 'auto' else None,
+                beam_size=5,
+                vad_filter=True,  # 启用语音活动检测
+                vad_parameters=dict(min_silence_duration_ms=500)
+            )
+            
+            if progress_callback:
+                progress_callback(70, "识别完成，正在整理结果...")
+            
+            # 收集结果
+            all_text = []
+            segment_list = []
+            
+            for segment in segments:
+                text = segment.text.strip()
+                all_text.append(text)
+                segment_list.append({
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': text
+                })
+            
+            full_text = ' '.join(all_text)
+            
+            # 生成输出路径
+            base_name = os.path.splitext(os.path.basename(audio_path))[0]
+            output_dir = os.path.dirname(audio_path)
+            txt_path = os.path.join(output_dir, f"{base_name}_文字稿.txt")
+            srt_path = os.path.join(output_dir, f"{base_name}_字幕.srt")
+            
+            # 保存为txt
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(f"音频转写结果\n")
+                f.write(f"=" * 50 + "\n")
+                f.write(f"文件：{os.path.basename(audio_path)}\n")
+                f.write(f"语言：{info.language} (概率: {info.language_probability:.2%})\n")
+                f.write(f"时长：{info.duration:.1f}秒\n")
+                f.write(f"模型：{model_size}\n")
+                f.write(f"=" * 50 + "\n\n")
+                f.write(full_text)
+            
+            # 保存为srt字幕
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                for i, seg in enumerate(segment_list, 1):
+                    start_time = self._format_srt_time(seg['start'])
+                    end_time = self._format_srt_time(seg['end'])
+                    f.write(f"{i}\n")
+                    f.write(f"{start_time} --> {end_time}\n")
+                    f.write(f"{seg['text']}\n\n")
+            
+            if progress_callback:
+                progress_callback(100, "转写完成！")
+            
+            return {
+                'success': True,
+                'text': full_text,
+                'segments': segment_list,
+                'language': info.language,
+                'language_prob': info.language_probability,
+                'duration': info.duration,
+                'txt_path': txt_path,
+                'srt_path': srt_path
+            }
+            
+        except Exception as e:
+            raise Exception(f"语音识别失败: {str(e)}")
+    
+    @staticmethod
+    def _format_srt_time(seconds):
+        """格式化SRT时间码"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        millis = int((seconds % 1) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+    
+    def get_available_models(self):
+        """获取可用模型列表"""
+        return self.MODEL_CONFIGS
+
+
+# ==================== 抖音下载器 ====================
 class DouyinDownloader:
     """
     抖音视频下载器
@@ -248,21 +421,27 @@ class DouyinDownloader:
         return filename
 
 
+# ==================== 视频下载核心类 ====================
 class VideoDownloader:
     """短视频下载器核心类"""
     
     def __init__(self):
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        if getattr(sys, 'frozen', False):
+            self.script_dir = os.path.dirname(sys.executable)
+        else:
+            self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.video_dir = os.path.join(self.script_dir, "downloads", "视频")
         self.audio_dir = os.path.join(self.script_dir, "downloads", "音频")
+        self.text_dir = os.path.join(self.script_dir, "downloads", "文字稿")
         self.download_dir = self.video_dir
         
-        for d in [self.video_dir, self.audio_dir]:
+        for d in [self.video_dir, self.audio_dir, self.text_dir]:
             if not os.path.exists(d):
                 os.makedirs(d)
         
         self.douyin_downloader = DouyinDownloader()
         self.ffmpeg_available = self._check_ffmpeg()
+        self.asr_engine = ASREngine()
     
     def _check_ffmpeg(self):
         """检查ffmpeg是否可用"""
@@ -528,8 +707,88 @@ class VideoDownloader:
                 'title': '视频',
                 'platform': self.detect_platform(url)
             }
+    
+    def transcribe_file(self, file_path, model_size='small', progress_callback=None, language='zh'):
+        """
+        转写音频/视频文件为文字
+        
+        Args:
+            file_path: 音频或视频文件路径
+            model_size: 模型大小
+            progress_callback: 进度回调
+            language: 语言
+        
+        Returns:
+            dict: 转写结果
+        """
+        # 确保ffmpeg可用（用于视频提取音频）
+        if not self.ffmpeg_available:
+            raise Exception("视频转文字需要ffmpeg支持")
+        
+        # 如果是视频文件，先提取音频
+        video_exts = ['.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.webm']
+        audio_exts = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.wma']
+        
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        if file_ext in video_exts:
+            # 视频文件：先提取音频
+            if progress_callback:
+                progress_callback(0, "正在从视频提取音频...")
+            
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            temp_audio = os.path.join(tempfile.gettempdir(), f"temp_asr_{os.getpid()}.mp3")
+            
+            try:
+                subprocess.run([
+                    'ffmpeg', '-i', file_path,
+                    '-vn', '-acodec', 'libmp3lame',
+                    '-ab', '192k',
+                    '-y', temp_audio
+                ], check=True, capture_output=True)
+                
+                # 转写音频
+                result = self.asr_engine.transcribe(
+                    temp_audio,
+                    model_size=model_size,
+                    progress_callback=lambda p, m: progress_callback(p * 0.3 + 10, m) if progress_callback else None,
+                    language=language
+                )
+                
+                # 将结果中的临时路径替换为原视频路径
+                if result['success']:
+                    # 重新保存到正确的位置
+                    output_dir = os.path.dirname(file_path)
+                    txt_path = os.path.join(output_dir, f"{base_name}_文字稿.txt")
+                    srt_path = os.path.join(output_dir, f"{base_name}_字幕.srt")
+                    
+                    # 更新返回路径
+                    result['txt_path'] = txt_path
+                    result['srt_path'] = srt_path
+                
+                return result
+                
+            finally:
+                if os.path.exists(temp_audio):
+                    try:
+                        os.remove(temp_audio)
+                    except:
+                        pass
+        
+        elif file_ext in audio_exts:
+            # 纯音频文件：直接转写
+            return self.asr_engine.transcribe(
+                file_path,
+                model_size=model_size,
+                progress_callback=progress_callback,
+                language=language
+            )
+        
+        else:
+            raise Exception(f"不支持的文件格式: {file_ext}，支持 mp3/wav/m4a/mp4 等")
 
 
+# ==================== GUI 界面 ====================
 class ClipboardMonitorGUI:
     """剪贴板监控下载器 GUI"""
     
@@ -537,13 +796,14 @@ class ClipboardMonitorGUI:
         self.downloader = VideoDownloader()
         self.monitoring = True
         self.last_clipboard = ""
-        self.processed_urls = set()  # 已处理链接集合
+        self.processed_urls = set()
         self.check_timer = None
+        self.asr_task_running = False
         
         self.root = tk.Tk()
-        self.root.title("短视频无水印下载器 v3.0 - 剪贴板监控版")
-        self.root.geometry("700x500")
-        self.root.minsize(600, 400)
+        self.root.title("短视频无水印下载器 v4.0 - 剪贴板监控版 + ASR")
+        self.root.geometry("750x650")
+        self.root.minsize(700, 550)
         self.root.resizable(True, True)
         
         self.setup_ui()
@@ -551,10 +811,26 @@ class ClipboardMonitorGUI:
     
     def setup_ui(self):
         """设置界面布局"""
-        main_frame = ttk.Frame(self.root, padding="15")
+        # 创建标签页
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # === 下载 tab ===
+        self.download_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.download_tab, text="📥 下载模式")
+        self.setup_download_tab()
+        
+        # === ASR tab ===
+        self.asr_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.asr_tab, text="🎤 音频转文字")
+        self.setup_asr_tab()
+    
+    def setup_download_tab(self):
+        """设置下载标签页"""
+        main_frame = ttk.Frame(self.download_tab, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # === 标题区域 ===
+        # 标题区域
         title_frame = ttk.Frame(main_frame)
         title_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -562,10 +838,10 @@ class ClipboardMonitorGUI:
         ttk.Label(title_frame, text="作者：铭晨 Vx：MingCv1", font=("微软雅黑", 9), foreground="gray").pack(anchor=tk.W)
         title_label.pack(side=tk.LEFT)
         
-        version_label = ttk.Label(title_frame, text="v3.0", foreground="gray", font=("微软雅黑", 10))
+        version_label = ttk.Label(title_frame, text="v4.0", foreground="gray", font=("微软雅黑", 10))
         version_label.pack(side=tk.RIGHT, pady=10)
         
-        # === 监控状态区域 ===
+        # 监控状态区域
         status_frame = ttk.LabelFrame(main_frame, text="📡 监控状态", padding="10")
         status_frame.pack(fill=tk.X, pady=5)
         
@@ -578,7 +854,6 @@ class ClipboardMonitorGUI:
         self.pause_btn = ttk.Button(status_inner, text="⏸️ 暂停", command=self.toggle_monitoring, width=10)
         self.pause_btn.pack(side=tk.RIGHT, padx=5)
         
-        # 处理记录数
         self.record_label = ttk.Label(status_inner, text=f"已处理: {len(self.processed_urls)} 个链接", foreground="gray")
         self.record_label.pack(side=tk.RIGHT, padx=10)
         
@@ -587,7 +862,7 @@ class ClipboardMonitorGUI:
         self.ffmpeg_label = ttk.Label(status_frame, text=ffmpeg_status, foreground="#FF9800" if not self.downloader.ffmpeg_available else "#4CAF50")
         self.ffmpeg_label.pack(anchor=tk.W)
         
-        # === 日志区域 ===
+        # 日志区域
         log_frame = ttk.LabelFrame(main_frame, text="📋 日志", padding="5")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -607,7 +882,7 @@ class ClipboardMonitorGUI:
         self.log_text.tag_configure("platform_xiaohongshu", foreground="#FF4081")
         self.log_text.tag_configure("platform_kuaishou", foreground="#FFFF00")
         
-        # === 底部按钮区域 ===
+        # 底部按钮
         footer_frame = ttk.Frame(main_frame)
         footer_frame.pack(fill=tk.X, pady=(5, 0))
         
@@ -627,14 +902,259 @@ class ClipboardMonitorGUI:
             chip = tk.Label(platforms_frame, text=platform, bg="#E8E8E8", fg="#333", padx=8, pady=2, font=("微软雅黑", 8))
             chip.pack(side=tk.LEFT, padx=2)
     
+    def setup_asr_tab(self):
+        """设置ASR标签页"""
+        main_frame = ttk.Frame(self.asr_tab, padding="15")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 标题
+        title_label = ttk.Label(main_frame, text="🎤 音频转文字 (ASR)", font=("微软雅黑", 16, "bold"))
+        title_label.pack(pady=(0, 10))
+        
+        # 说明
+        info_frame = ttk.LabelFrame(main_frame, text="📖 使用说明", padding="10")
+        info_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        info_text = """
+• 方式一：选择本地音频/视频文件进行转文字
+• 方式二：输入视频链接，自动下载并转文字
+• 支持格式：MP3、WAV、M4A、MP4、AVI等
+• 输出结果：文字稿(.txt) + 字幕(.srt)
+        """
+        ttk.Label(info_frame, text=info_text.strip(), font=("微软雅黑", 9), justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # 文件选择区域
+        file_frame = ttk.LabelFrame(main_frame, text="📁 选择文件", padding="10")
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        file_inner = ttk.Frame(file_frame)
+        file_inner.pack(fill=tk.X)
+        
+        self.asr_file_path = tk.StringVar()
+        ttk.Entry(file_inner, textvariable=self.asr_file_path, font=("微软雅黑", 10)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(file_inner, text="浏览...", command=self.browse_asr_file).pack(side=tk.RIGHT)
+        
+        # 或链接输入
+        link_frame = ttk.Frame(file_frame)
+        link_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Label(link_frame, text="或输入链接：").pack(side=tk.LEFT)
+        self.asr_link = tk.StringVar()
+        ttk.Entry(link_frame, textvariable=self.asr_link, font=("微软雅黑", 10), width=50).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        # 模型选择
+        model_frame = ttk.LabelFrame(main_frame, text="🤖 模型设置", padding="10")
+        model_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        model_inner = ttk.Frame(model_frame)
+        model_inner.pack(fill=tk.X)
+        
+        ttk.Label(model_inner, text="模型大小：").pack(side=tk.LEFT)
+        
+        self.asr_model_var = tk.StringVar(value='small')
+        model_combo = ttk.Combobox(
+            model_inner,
+            textvariable=self.asr_model_var,
+            values=['tiny', 'base', 'small', 'medium'],
+            state='readonly',
+            width=10
+        )
+        model_combo.pack(side=tk.LEFT, padx=5)
+        
+        # 模型推荐说明
+        model_desc = ttk.Label(model_inner, text="推荐 small/medium（中文效果好）", foreground="gray")
+        model_desc.pack(side=tk.LEFT, padx=10)
+        
+        # 语言选择
+        lang_inner = ttk.Frame(model_frame)
+        lang_inner.pack(fill=tk.X, pady=(5, 0))
+        
+        ttk.Label(lang_inner, text="识别语言：").pack(side=tk.LEFT)
+        
+        self.asr_lang_var = tk.StringVar(value='zh')
+        lang_combo = ttk.Combobox(
+            lang_inner,
+            textvariable=self.asr_lang_var,
+            values=[('zh', '中文'), ('en', '英文'), ('auto', '自动检测')],
+            state='readonly',
+            width=15
+        )
+        lang_combo.pack(side=tk.LEFT, padx=5)
+        
+        # 开始按钮
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.asr_start_btn = ttk.Button(
+            btn_frame,
+            text="🎤 开始转写",
+            command=self.start_asr_task,
+            style="Accent.TButton"
+        )
+        self.asr_start_btn.pack(side=tk.LEFT)
+        
+        self.asr_progress_var = tk.StringVar(value="")
+        ttk.Label(btn_frame, textvariable=self.asr_progress_var, foreground="#4CAF50").pack(side=tk.LEFT, padx=20)
+        
+        # 日志区域
+        log_frame = ttk.LabelFrame(main_frame, text="📋 识别日志", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        self.asr_log = scrolledtext.ScrolledText(
+            log_frame, wrap=tk.WORD, font=("Consolas", 10),
+            relief=tk.FLAT, bg="#1E1E1E", fg="#00FF00",
+            height=12
+        )
+        self.asr_log.pack(fill=tk.BOTH, expand=True)
+        self.asr_log.tag_configure("info", foreground="#00FF00")
+        self.asr_log.tag_configure("warning", foreground="#FF9800")
+        self.asr_log.tag_configure("error", foreground="#FF5252")
+        self.asr_log.tag_configure("success", foreground="#69F0AE")
+        
+        # 结果预览
+        result_frame = ttk.LabelFrame(main_frame, text="📝 转写结果预览", padding="5")
+        result_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.asr_result = scrolledtext.ScrolledText(
+            result_frame, wrap=tk.WORD, font=("微软雅黑", 10),
+            relief=tk.FLAT, bg="#F5F5F5",
+            height=6
+        )
+        self.asr_result.pack(fill=tk.BOTH, expand=True)
+    
+    def browse_asr_file(self):
+        """浏览选择音频/视频文件"""
+        filetypes = [
+            ("音频文件", "*.mp3 *.wav *.m4a *.aac *.ogg *.flac"),
+            ("视频文件", "*.mp4 *.avi *.mkv *.mov"),
+            ("所有文件", "*.*")
+        ]
+        file_path = filedialog.askopenfilename(
+            title="选择音频或视频文件",
+            filetypes=filetypes
+        )
+        if file_path:
+            self.asr_file_path.set(file_path)
+    
+    def start_asr_task(self):
+        """启动ASR转写任务"""
+        if self.asr_task_running:
+            return
+        
+        file_path = self.asr_file_path.get().strip()
+        link = self.asr_link.get().strip()
+        
+        if not file_path and not link:
+            messagebox.showwarning("提示", "请选择文件或输入视频链接")
+            return
+        
+        self.asr_task_running = True
+        self.asr_start_btn.config(state='disabled')
+        self.asr_progress_var.set("准备中...")
+        self.asr_result.delete(1.0, tk.END)
+        
+        thread = threading.Thread(target=self._asr_task, args=(file_path, link))
+        thread.daemon = True
+        thread.start()
+    
+    def _asr_task(self, file_path, link):
+        """ASR转写任务（在线程中运行）"""
+        try:
+            model_size = self.asr_model_var.get()
+            language = self.asr_lang_var.get()
+            
+            def progress_callback(percent, message):
+                self.root.after(0, lambda: self._update_asr_progress(percent, message))
+            
+            def log_callback(message, tag="info"):
+                self.root.after(0, lambda: self._asr_log(message, tag))
+            
+            progress_callback(0, "正在处理...")
+            log_callback("开始语音识别...", "info")
+            
+            if link:
+                # 从链接下载并转写
+                log_callback(f"📥 正在下载视频：{link[:50]}...", "info")
+                
+                # 下载视频
+                video_result = self.downloader.download_video(
+                    link,
+                    progress_callback=lambda p, d, t: self.root.after(0, lambda: self._asr_log(f"   下载进度: {p:.1f}%", "info"))
+                )
+                
+                if video_result.get('file_path') and os.path.exists(video_result['file_path']):
+                    file_path = video_result['file_path']
+                    log_callback(f"✅ 视频下载完成：{os.path.basename(file_path)}", "success")
+                else:
+                    raise Exception("视频下载失败")
+            
+            if not file_path or not os.path.exists(file_path):
+                raise Exception(f"文件不存在：{file_path}")
+            
+            log_callback(f"🎤 开始识别：{os.path.basename(file_path)}", "info")
+            
+            # 执行转写
+            result = self.downloader.transcribe_file(
+                file_path,
+                model_size=model_size,
+                progress_callback=progress_callback,
+                language=language
+            )
+            
+            if result['success']:
+                log_callback("=" * 50, "success")
+                log_callback(f"✅ 识别完成！", "success")
+                log_callback(f"📄 语言：{result['language']} (概率: {result['language_prob']:.1%})", "success")
+                log_callback(f"⏱️ 时长：{result['duration']:.1f} 秒", "success")
+                log_callback(f"📝 文字稿：{os.path.basename(result['txt_path'])}", "success")
+                log_callback(f"📝 字幕：{os.path.basename(result['srt_path'])}", "success")
+                log_callback("=" * 50, "success")
+                
+                # 显示结果预览
+                preview_text = f"【识别结果预览】\n{result['text'][:500]}"
+                if len(result['text']) > 500:
+                    preview_text += "\n\n... (未完整显示)"
+                
+                self.root.after(0, lambda: self.asr_result.delete(1.0, tk.END))
+                self.root.after(0, lambda: self.asr_result.insert(1.0, preview_text))
+                self.root.after(0, lambda: self._update_asr_progress(100, "✅ 完成！"))
+            else:
+                raise Exception("识别失败")
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.root.after(0, lambda: self._asr_log(f"❌ 错误：{error_msg}", "error"))
+            self.root.after(0, lambda: self._update_asr_progress(0, "❌ 失败"))
+        
+        finally:
+            self.root.after(0, lambda: self._asr_task_finished())
+    
+    def _update_asr_progress(self, percent, message):
+        """更新ASR进度"""
+        self.asr_progress_var.set(f"{message}")
+    
+    def _asr_log(self, message, tag="info"):
+        """ASR日志"""
+        self.asr_log.config(state='normal')
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.asr_log.insert(tk.END, f"[{timestamp}] ", "info")
+        self.asr_log.insert(tk.END, message + "\n", tag)
+        self.asr_log.see(tk.END)
+        self.asr_log.config(state='disabled')
+    
+    def _asr_task_finished(self):
+        """ASR任务完成"""
+        self.asr_task_running = False
+        self.asr_start_btn.config(state='normal')
+    
     def get_timestamp(self):
         """获取当前时间戳字符串"""
         return datetime.now().strftime("%H:%M:%S")
     
     def log(self, message, tag="info"):
         """添加日志"""
-        timestamp = self.get_timestamp()
         self.log_text.config(state='normal')
+        timestamp = self.get_timestamp()
         self.log_text.insert(tk.END, f"[{timestamp}] ", "info")
         self.log_text.insert(tk.END, message + "\n", tag)
         self.log_text.see(tk.END)
@@ -673,7 +1193,6 @@ class ClipboardMonitorGUI:
             return
         
         try:
-            # 使用pyperclip获取剪贴板内容
             current = pyperclip.paste()
         except:
             try:
@@ -681,29 +1200,23 @@ class ClipboardMonitorGUI:
             except:
                 current = ""
         
-        # 检查是否有变化且是新链接
         if current and current != self.last_clipboard:
             self.last_clipboard = current
             
-            # 提取URL
             url = self.downloader.extract_url(current)
             
             if url and url not in self.processed_urls:
-                # 检测平台
                 platform = self.downloader.detect_platform(url)
                 platform_tag = f"platform_{platform[:4]}" if platform in ["抖音", "B站"] else "info"
                 self.log(f"🔗 检测到{platform}链接：{url[:60]}...", platform_tag)
                 
-                # 标记为已处理
                 self.processed_urls.add(url)
                 self.record_label.config(text=f"已处理: {len(self.processed_urls)} 个链接")
                 
-                # 启动下载
                 thread = threading.Thread(target=self.download_task, args=(url, platform))
                 thread.daemon = True
                 thread.start()
         
-        # 1秒后继续监控
         self.check_timer = self.root.after(1000, self.start_monitoring)
     
     def download_task(self, url, platform):
@@ -718,7 +1231,6 @@ class ClipboardMonitorGUI:
         try:
             self.log(f"📥 开始下载：{url[:50]}...")
             
-            # 下载视频
             self.log("📹 正在下载视频...")
             video_result = self.downloader.download_video(
                 url,
@@ -730,7 +1242,6 @@ class ClipboardMonitorGUI:
             else:
                 self.log("📹 视频下载完成", "success")
             
-            # 下载音频（如果ffmpeg可用）
             if self.downloader.ffmpeg_available:
                 self.log("🎵 正在提取音频...")
                 audio_result = self.downloader.download_audio(
@@ -788,7 +1299,6 @@ class ClipboardMonitorGUI:
     
     def run(self):
         """运行程序"""
-        # 居中窗口
         self.root.update_idletasks()
         width = self.root.winfo_width()
         height = self.root.winfo_height()
@@ -796,12 +1306,12 @@ class ClipboardMonitorGUI:
         y = (self.root.winfo_screenheight() // 2) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
         
-        # 绑定关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # 初始化日志
         self.log("🚀 程序已启动，正在监控剪贴板...")
         self.log("📋 提示：复制视频链接后会自动下载视频+音频")
+        self.log("📋 切换到「音频转文字」标签可进行语音识别")
         
         if not self.downloader.ffmpeg_available:
             self.log("⚠️ 警告：未检测到ffmpeg，音频功能将不可用", "warning")
@@ -815,8 +1325,9 @@ class ClipboardMonitorGUI:
 def main():
     """主函数"""
     print("=" * 50)
-    print("短视频无水印下载器 v3.0 - 剪贴板监控版")
+    print("短视频无水印下载器 v4.0")
     print("支持：抖音 | B站 | 小红书 | 快手")
+    print("新增功能：音频转文字 (ASR)")
     print("=" * 50)
     
     try:
