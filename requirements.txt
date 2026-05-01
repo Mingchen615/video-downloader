@@ -1,0 +1,7 @@
+# 短视频下载器依赖
+yt-dlp>=2024.0.0
+requests>=2.28.0
+pyperclip>=1.8.0
+
+# 可选依赖（用于自动导出浏览器cookies）
+# browser-cookie3>=0.19.1
