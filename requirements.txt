@@ -3,11 +3,14 @@ yt-dlp>=2024.0.0
 requests>=2.28.0
 pyperclip>=1.8.0
 
+# 抖音签名算法依赖 (v5.0新增)
+gmssl>=3.2.0
+
 # ASR语音识别依赖 (v4.0新增)
 faster-whisper>=1.2.0
 
-# 可选依赖（用于自动导出浏览器cookies）
-# browser-cookie3>=0.19.1
+# 浏览器Cookies解密依赖（抖音自动读取Edge cookies需要）
+cryptography>=42.0.0
 
 # 注意：faster-whisper 需要 NVIDIA CUDA 支持
 # 确保已安装 CUDA 12.x 和 cuDNN

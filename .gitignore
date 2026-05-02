@@ -4,4 +4,5 @@ build/
 dist/
 *.spec
 downloads/
-*.zip
+# 保留发布版本的 zip 包
+!短视频下载器_v*.zip
