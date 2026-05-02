@@ -1,0 +1,20 @@
+# 短视频下载器依赖
+yt-dlp>=2024.0.0
+requests>=2.28.0
+pyperclip>=1.8.0
+
+# ASR语音识别依赖 (v4.0新增)
+faster-whisper>=1.2.0
+
+# 可选依赖（用于自动导出浏览器cookies）
+# browser-cookie3>=0.19.1
+
+# 注意：faster-whisper 需要 NVIDIA CUDA 支持
+# 确保已安装 CUDA 12.x 和 cuDNN
+# 
+# Windows 用户建议安装步骤：
+# 1. 安装 Visual Studio Build Tools (包含 C++ 编译环境)
+# 2. pip install faster-whisper
+# 
+# 如果安装失败，尝试安装预编译版本：
+# pip install faster-whisper --only-binary=:all:

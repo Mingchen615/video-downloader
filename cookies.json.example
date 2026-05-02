@@ -1,0 +1,14 @@
+[
+  {
+    "name": "sessionid",
+    "value": "YOUR_SESSION_ID_HERE",
+    "domain": ".douyin.com",
+    "path": "/"
+  },
+  {
+    "name": "ttwid",
+    "value": "YOUR_TTWID_HERE",
+    "domain": ".douyin.com",
+    "path": "/"
+  }
+]

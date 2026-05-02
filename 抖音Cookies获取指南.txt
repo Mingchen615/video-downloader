@@ -1,0 +1,80 @@
+# 抖音Cookies获取指南
+
+## 为什么需要Cookies？
+
+抖音为了保护内容版权，下载视频时需要验证请求来源。如果没有有效的Cookies，可能无法下载或只能下载到有水印的视频。
+
+## 获取Cookies的方法
+
+### 方法1：Firefox浏览器（推荐）
+
+1. 安装Firefox浏览器
+2. 安装Cookie Quick Manager扩展：
+   - 打开 https://addons.mozilla.org
+   - 搜索"Cookie Quick Manager"
+   - 点击"添加到Firefox"
+3. 登录抖音网页版：https://www.douyin.com
+4. 点击扩展图标，点击"Export"导出Cookies
+5. 选择"Netscape"格式，保存为 `cookies.txt`
+6. 将 `cookies.txt` 放到本程序目录下
+
+### 方法2：Chrome浏览器
+
+1. 登录抖音网页版：https://www.douyin.com
+2. 按F12打开开发者工具
+3. 切换到"Network"（网络）标签
+4. 刷新页面，找到任意请求（如video相关）
+5. 点击该请求，查看"Headers" -> "Request Headers"
+6. 复制"Cookie:"后面的所有内容
+7. 创建 `cookies.txt` 文件，内容格式：
+
+```
+# Netscape HTTP Cookie File
+.douyin.com	TRUE	/	TRUE	0	sessionid	你的sessionid值
+.douyin.com	TRUE	/	TRUE	0	csrf_token	你的csrf_token值
+```
+
+### 方法3：使用浏览器开发者工具
+
+1. 登录抖音网页版
+2. 按F12 -> "Application"标签
+3. 左侧找到"Cookies" -> "https://www.douyin.com"
+4. 逐个复制cookie的名称和值
+5. 格式参考上面方法2
+
+### 方法4：从浏览器导出为JSON
+
+某些扩展可以导出完整cookies为JSON格式，需要转换为Netscape格式：
+
+```
+# Netscape HTTP Cookie File
+.domain	TRUE	/path	TRUE	expiry	name	value
+```
+
+## 必需的Cookies字段
+
+抖音下载通常需要以下cookies（至少需要一个）：
+- `sessionid` - 登录会话ID
+- `sessionid_ss` - 安全的session ID
+- `csrf_token` - CSRF令牌
+- `ttwid` - 抖音临时ID
+
+## 常见问题
+
+### Q: 为什么提示"Fresh cookies needed"？
+A: Cookies已过期，需要重新获取。请重新登录抖音并导出新的cookies。
+
+### Q: Cookies放在哪里？
+A: 将 `cookies.txt` 放到本程序（video_downloader.py）所在的目录。
+
+### Q: Edge浏览器的cookies无法读取怎么办？
+A: 由于Edge使用DPAPI加密，确实无法直接读取。建议使用Firefox浏览器，或手动复制cookies内容。
+
+### Q: 可以不登录下载吗？
+A: 部分公开视频可以下载有水印版本。完整无水印下载通常需要登录状态。
+
+## 更新日志
+
+- v2.2: 添加Cookies设置按钮和详细指南
+- v2.1: 尝试第三方API作为备用方案
+- v2.0: 改进抖音下载逻辑
