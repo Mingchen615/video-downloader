@@ -5,10 +5,11 @@
 支持平台：抖音、B站、小红书、快手
 支持功能：视频下载、音频提取、ASR语音识别
 
-作者：AI Assistant
-版本：v4.9 - 安全修复：移除第三方API依赖，改用网页解析；新增模型下载确认；添加安全声明
+作者：铭晨 ·Vx MingCv1
+版本：v4.9.1 - 安全修复：抖音改用yt-dlp方案（开源工具，持续维护），cookies改为可选；移除网页解析方案（反爬失效）
 
 更新说明：
+- v4.9.1: 抖音改用yt-dlp开源工具下载（第三方API和网页解析均已失效）；cookies改为可选功能；移除DouyinDownloader中的网页解析方法
 - v4.9: 安全修复：移除api.douyin.wtf第三方API依赖，改为直接从抖音网页HTML解析；新增faster-whisper模型下载确认；添加安全声明
 - v4.8: 新增"音频工具"标签页；支持音频格式转换（MP3/WAV/M4A/AAC/OGG/FLAC互转）；音频裁剪（设置起止时间）；音频合并（多文件合并）；所有功能基于ffmpeg实现
 - v4.7: 新增"字幕烧录"标签页；支持SRT字幕硬烧到视频（ffmpeg）；自定义字幕样式（字号/颜色/描边/位置）；SRT转ASS格式转换；转写完成后可直接烧录
@@ -19,9 +20,9 @@
 安全声明：
 - 本工具不收集任何用户数据
 - 所有下载和识别均在本地完成
-- 网络请求仅用于视频平台公开页面访问
+- 使用开源yt-dlp库访问平台公开内容，不依赖任何第三方私有API
+- Cookies为可选功能，仅在部分受限视频时需要
 - AI模型来自HuggingFace开源仓库（首次使用需下载）
-- 不依赖任何第三方私有API
 """
 
 import tkinter as tk
@@ -477,24 +478,17 @@ class ASREngine:
         return self.MODEL_CONFIGS
 
 
-# ==================== 抖音下载器 ====================
+# ==================== 抖音URL解析器 ====================
 class DouyinDownloader:
     """
-    抖音视频下载器
-    从抖音网页HTML直接解析视频信息，无需第三方API和Cookies
+    抖音视频URL解析器
+    仅用于从分享链接提取视频ID，实际下载使用yt-dlp
     """
-    
-    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': self.USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.douyin.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         })
     
     def get_video_id_from_url(self, url):
@@ -526,298 +520,6 @@ class DouyinDownloader:
                     pass
         
         return None
-    
-    def get_video_info(self, url):
-        """获取视频信息（尝试多种方式）"""
-        # 方法1：尝试第三方API
-        info = self._get_info_from_api(url)
-        if info and info.get('video_url'):
-            return info
-        
-        # 方法2：解析网页
-        info = self._get_info_from_page(url)
-        if info and info.get('video_url'):
-            return info
-        
-        return None
-    
-    def _get_info_from_api(self, url):
-        """
-        从抖音网页HTML直接解析视频信息（无需第三方API和Cookies）
-        抖音页面将视频信息嵌入在RENDER_DATA或__NEXT_DATA__的script标签中
-        """
-        try:
-            # 获取视频ID
-            video_id = self.get_video_id_from_url(url)
-            if not video_id:
-                return None
-            
-            # 直接请求抖音视频页面
-            page_url = f'https://www.douyin.com/video/{video_id}'
-            
-            # 完整的浏览器Headers，避免被识别为爬虫
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0',
-                'Referer': 'https://www.douyin.com/',
-            }
-            
-            response = self.session.get(page_url, headers=headers, timeout=15)
-            response.raise_for_status()
-            html = response.text
-            
-            # 方法1：尝试从RENDER_DATA中提取
-            video_url = None
-            title = f'douyin_video_{video_id}'
-            author = '未知作者'
-            
-            # 匹配RENDER_DATA
-            patterns = [
-                r'id="RENDER_DATA"[^>]*>([^<]+)</script>',
-                r'window\.__RENDER_DATA__\s*=\s*([^;]+);',
-                r'window\.__NEXT_DATA__\s*=\s*({.*?})\s*</script>',
-                r'<script[^>]*>.*?("video_id":\s*"' + video_id + r'.*?)</script>',
-            ]
-            
-            for pattern in patterns:
-                try:
-                    match = re.search(pattern, html, re.DOTALL)
-                    if match:
-                        data_str = match.group(1) if match.lastindex == 1 else None
-                        if not data_str:
-                            data_str = match.group(0)
-                        
-                        # URL解码
-                        import urllib.parse
-                        try:
-                            data_str = urllib.parse.unquote(data_str)
-                        except:
-                            pass
-                        
-                        # 尝试解析JSON
-                        try:
-                            data = json.loads(data_str)
-                            # 在数据中搜索视频URL
-                            video_url = self._extract_video_url_from_data(data)
-                            if video_url:
-                                break
-                        except json.JSONDecodeError:
-                            # 如果直接解析失败，尝试搜索视频URL模式
-                            url_match = re.search(r'https?://[^"\'\\]+\.mp4[^"\'\\]*', data_str)
-                            if url_match:
-                                video_url = url_match.group(0)
-                                # 去除无水印标识
-                                video_url = video_url.replace('playwm', 'play')
-                                break
-                except:
-                    continue
-            
-            # 方法2：从HTML中直接搜索视频URL
-            if not video_url:
-                url_patterns = [
-                    r'"playAddr":\s*"([^"]+)"',
-                    r'"play_addr":\s*{[^}]*"url_list":\s*\["([^"]+)"',
-                    r'src="(https?://[^"]*\.mp4[^"]*)"',
-                ]
-                for pattern in url_patterns:
-                    match = re.search(pattern, html)
-                    if match:
-                        video_url = match.group(1)
-                        video_url = urllib.parse.unquote(video_url)
-                        video_url = video_url.replace('\\u002F', '/')
-                        video_url = video_url.replace('playwm', 'play')
-                        break
-            
-            # 方法3：从script标签中搜索
-            if not video_url:
-                script_pattern = r'<script[^>]*>(.*?)</script>'
-                for script_match in re.finditer(script_pattern, html, re.DOTALL):
-                    script_content = script_match.group(1)
-                    if video_id in script_content:
-                        # 在script中搜索mp4链接
-                        url_match = re.search(r'https?://[^\s"\'\\]+\.mp4[^\s"\'\\]*', script_content)
-                        if url_match:
-                            video_url = url_match.group(0)
-                            video_url = urllib.parse.unquote(video_url)
-                            video_url = video_url.replace('playwm', 'play')
-                            break
-            
-            if video_url:
-                # 提取标题
-                title_match = re.search(r'"desc":\s*"([^"]+)"', html)
-                if title_match:
-                    title = title_match.group(1)
-                    title = urllib.parse.unquote(title)
-                
-                # 提取作者
-                author_match = re.search(r'"nickname":\s*"([^"]+)"', html)
-                if author_match:
-                    author = author_match.group(1)
-                    author = urllib.parse.unquote(author)
-                
-                return {
-                    'title': title or f'douyin_video_{video_id}',
-                    'author': author,
-                    'duration': 0,
-                    'video_url': video_url,
-                    'aweme_id': video_id,
-                }
-            
-        except Exception:
-            pass
-        
-        return None
-    
-    def _extract_video_url_from_data(self, data, depth=0):
-        """递归从数据中提取视频URL"""
-        if depth > 10:
-            return None
-            
-        if isinstance(data, dict):
-            # 检查常见的关键字
-            for key in ['playAddr', 'play_addr', 'video_url', 'url', 'uri']:
-                if key in data:
-                    value = data[key]
-                    if isinstance(value, str) and ('.mp4' in value or 'video' in value.lower()):
-                        return value
-                    elif isinstance(value, dict):
-                        url = self._extract_video_url_from_data(value, depth + 1)
-                        if url:
-                            return url
-            
-            # 递归搜索
-            for value in data.values():
-                result = self._extract_video_url_from_data(value, depth + 1)
-                if result:
-                    return result
-                    
-        elif isinstance(data, list):
-            for item in data:
-                result = self._extract_video_url_from_data(item, depth + 1)
-                if result:
-                    return result
-        
-        return None
-    
-    def _get_info_from_page(self, url):
-        """从网页HTML中解析视频信息"""
-        video_id = self.get_video_id_from_url(url)
-        if not video_id:
-            return None
-        
-        page_url = f'https://www.iesdouyin.com/share/video/{video_id}/'
-        
-        try:
-            response = self.session.get(page_url, timeout=15)
-            response.raise_for_status()
-            html = response.text
-            
-            pattern = re.compile(r'window\._ROUTER_DATA\s*=\s*(.*?)</script>', re.DOTALL)
-            match = pattern.search(html)
-            
-            if match:
-                json_str = match.group(1).strip()
-                data = json.loads(json_str)
-                
-                try:
-                    page_data = data['loaderData']['video_(id)/page']
-                    video_info_res = page_data.get('videoInfoRes', {})
-                    items = video_info_res.get('item_list', [])
-                    
-                    if items:
-                        item = items[0]
-                        video_info = item.get('video', {})
-                        
-                        play_addr = video_info.get('play_addr', {})
-                        url_list = play_addr.get('url_list', [])
-                        
-                        video_url = None
-                        if url_list:
-                            watermark_url = url_list[0]
-                            video_url = watermark_url.replace('playwm', 'play')
-                        
-                        return {
-                            'title': item.get('desc', f'douyin_video_{video_id}'),
-                            'author': item.get('author', {}).get('nickname', '未知作者'),
-                            'duration': video_info.get('duration', 0) // 1000,
-                            'video_url': video_url,
-                            'aweme_id': video_id,
-                        }
-                except (KeyError, IndexError, TypeError):
-                    pass
-            
-        except Exception:
-            pass
-        
-        return None
-    
-    def download_video(self, url, save_path, progress_callback=None):
-        """下载抖音视频"""
-        info = self.get_video_info(url)
-        
-        if not info:
-            raise Exception("无法获取视频信息，请稍后重试或检查链接是否正确")
-        
-        video_url = info['video_url']
-        title = info['title']
-        
-        if not video_url:
-            raise Exception("无法获取视频下载地址，请稍后重试")
-        
-        clean_title = self._clean_filename(title)
-        file_path = os.path.join(save_path, f"{clean_title}.mp4")
-        
-        counter = 1
-        while os.path.exists(file_path):
-            file_path = os.path.join(save_path, f"{clean_title}_{counter}.mp4")
-            counter += 1
-        
-        self._download_file(video_url, file_path, progress_callback)
-        
-        return {
-            'success': True,
-            'title': title,
-            'save_path': file_path
-        }
-    
-    def _download_file(self, url, save_path, progress_callback=None):
-        """下载文件到本地"""
-        response = self.session.get(url, stream=True, timeout=60)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        
-        with open(save_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    if progress_callback and total_size > 0:
-                        percent = (downloaded / total_size) * 100
-                        progress_callback(percent, downloaded, total_size)
-    
-    @staticmethod
-    def _clean_filename(filename):
-        """清理文件名中的非法字符"""
-        illegal_chars = r'[\\/:*?"<>|]'
-        filename = re.sub(illegal_chars, '_', filename)
-        if len(filename) > 200:
-            filename = filename[:200]
-        filename = filename.strip(' .')
-        if not filename:
-            filename = 'douyin_video'
-        return filename
 
 
 # ==================== 视频下载核心类 ====================
@@ -901,205 +603,85 @@ class VideoDownloader:
             return '未知平台'
     
     def download_video(self, url, progress_callback=None):
-        """下载视频"""
-        platform = self.detect_platform(url)
-        
-        if platform == '抖音':
-            return self._download_douyin(url, progress_callback)
-        
+        """下载视频（所有平台统一使用yt-dlp）"""
         return self._download_ytdlp(url, progress_callback)
     
     def download_audio(self, url, progress_callback=None):
-        """提取音频"""
-        platform = self.detect_platform(url)
-        
-        if platform == '抖音':
-            return self._download_audio_douyin(url, progress_callback)
-        
+        """提取音频（所有平台统一使用yt-dlp）"""
         return self._download_audio_ytdlp(url, progress_callback)
     
     def download_audio_only(self, url, progress_callback=None):
         """只下载音频用于ASR识别，保存到临时目录，识别后自动清理
-        抖音用DouyinDownloader（不需要cookies），其他平台用yt-dlp"""
+        所有平台统一使用yt-dlp"""
         import tempfile
         temp_dir = tempfile.mkdtemp(prefix="asr_")
-        platform = self.detect_platform(url)
         
         try:
-            if platform == '抖音':
-                # 抖音用DouyinDownloader，不需要cookies
-                info = self.douyin_downloader.get_video_info(url)
-                if not info or not info.get('video_url'):
-                    raise Exception("无法获取抖音视频信息，请检查链接是否正确")
-                
-                video_title = info['title']
-                clean_title = self.clean_filename(video_title)
-                temp_video_path = os.path.join(temp_dir, f"temp_{os.getpid()}.mp4")
-                audio_output = os.path.join(temp_dir, f"{clean_title}.mp3")
-                
-                if progress_callback:
-                    progress_callback(0, 0, 0, "正在下载抖音视频...")  # (percent, downloaded, total, message)
-                
-                def download_progress_cb(p, d, t):
-                    if progress_callback:
-                        progress_callback(p * 0.7, d, t, f"下载进度: {p:.1f}%")
-                
-                self.douyin_downloader._download_file(
-                    info['video_url'], temp_video_path, download_progress_cb
-                )
-                
-                if self.ffmpeg_available:
-                    if progress_callback:
-                        progress_callback(70, 0, 0, "正在提取音频...")
-                    subprocess.run([
-                        'ffmpeg', '-i', temp_video_path,
-                        '-vn', '-acodec', 'libmp3lame', '-ab', '192k', '-y', audio_output
-                    ], check=True, capture_output=True)
-                    # 删除临时视频，只留音频
-                    if os.path.exists(temp_video_path):
-                        os.remove(temp_video_path)
-                    if progress_callback:
-                        progress_callback(100, 100, 100, "音频提取完成")
-                    return {'success': True, 'title': video_title, 'file_path': audio_output, 'temp_dir': temp_dir}
-                else:
-                    # 没有ffmpeg就直接用mp4识别
-                    if progress_callback:
-                        progress_callback(100, 100, 100, "下载完成")
-                    return {'success': True, 'title': video_title, 'file_path': temp_video_path, 'temp_dir': temp_dir}
-            else:
-                # 其他平台用yt-dlp
-                if not self.ffmpeg_available:
-                    raise Exception("音频提取需要ffmpeg，请先安装ffmpeg")
-                
-                info = self._get_video_info_basic(url)
-                video_title = info.get('title', 'unknown')
-                clean_title = self.clean_filename(video_title)
-                output_path = os.path.join(temp_dir, f"{clean_title}.%(ext)s")
-                
-                ydl_opts = {
-                    'format': 'bestaudio/best',
-                    'outtmpl': output_path,
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                    'quiet': True,
-                    'no_warnings': True,
-                    'progress_hooks': [],
-                    'no_check_certificate': True,
-                }
-                
-                # 抖音等平台需要cookies认证
-                if self._has_cookies:
-                    ydl_opts['cookiefile'] = self.cookies_path
-                
-                if progress_callback:
-                    def ytdlp_progress_adapter(d):
-                        total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
-                        downloaded = d.get('downloaded_bytes', 0)
-                        if total > 0:
-                            percent = (downloaded / total) * 100
-                            if d['status'] == 'downloading':
-                                progress_callback(percent * 0.7, downloaded, total, f"下载进度: {percent:.1f}%")
-                            elif d['status'] == 'finished':
-                                progress_callback(70, 0, 0, "正在提取音频...")
-                        else:
-                            progress_callback(0, 0, 0, "下载中...")
-                    ydl_opts['progress_hooks'].append(ytdlp_progress_adapter)
-                
+            if not self.ffmpeg_available:
+                raise Exception("音频提取需要ffmpeg，请先安装ffmpeg")
+            
+            info = self._get_video_info_basic(url)
+            video_title = info.get('title', 'unknown')
+            clean_title = self.clean_filename(video_title)
+            output_path = os.path.join(temp_dir, f"{clean_title}.%(ext)s")
+            
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': output_path,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+                'progress_hooks': [],
+                'no_check_certificate': True,
+            }
+            
+            # Cookies为可选功能，仅在部分受限视频时需要
+            if self._has_cookies:
+                ydl_opts['cookiefile'] = self.cookies_path
+            
+            if progress_callback:
+                def ytdlp_progress_adapter(d):
+                    total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                    downloaded = d.get('downloaded_bytes', 0)
+                    if total > 0:
+                        percent = (downloaded / total) * 100
+                        if d['status'] == 'downloading':
+                            progress_callback(percent * 0.7, downloaded, total, f"下载进度: {percent:.1f}%")
+                        elif d['status'] == 'finished':
+                            progress_callback(70, 0, 0, "正在提取音频...")
+                    else:
+                        progress_callback(0, 0, 0, "下载中...")
+                ydl_opts['progress_hooks'].append(ytdlp_progress_adapter)
+            
+            try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
-                
-                # 查找生成的MP3文件
-                for f in os.listdir(temp_dir):
-                    if f.endswith('.mp3'):
-                        return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f), 'temp_dir': temp_dir}
-                
-                # 没有MP3就找任意音频文件
-                for f in os.listdir(temp_dir):
+            except Exception as e:
+                # 如果下载失败且没有cookies，提示添加cookies
+                if not self._has_cookies:
+                    raise Exception(f"视频下载失败，可能是部分视频需要登录。如需登录，请将cookies.json放在程序同目录下。\n\n错误详情: {str(e)}")
+                raise
+            
+            # 查找生成的MP3文件
+            for f in os.listdir(temp_dir):
+                if f.endswith('.mp3'):
+                    if progress_callback:
+                        progress_callback(100, 100, 100, "音频提取完成")
                     return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f), 'temp_dir': temp_dir}
-                
-                raise Exception("音频下载失败：未找到输出文件")
+            
+            # 没有MP3就找任意音频文件
+            for f in os.listdir(temp_dir):
+                if progress_callback:
+                    progress_callback(100, 100, 100, "下载完成")
+                return {'success': True, 'title': video_title, 'file_path': os.path.join(temp_dir, f), 'temp_dir': temp_dir}
+            
+            raise Exception("音频下载失败：未找到输出文件")
         except Exception as e:
             raise Exception(f"音频提取失败：{str(e)}")
-    
-    def _download_douyin(self, url, progress_callback=None):
-        """下载抖音视频"""
-        try:
-            result = self.douyin_downloader.download_video(
-                url, 
-                self.video_dir, 
-                progress_callback
-            )
-            return {
-                'success': True,
-                'title': result['title'],
-                'save_path': self.video_dir,
-                'file_path': result['save_path']
-            }
-        except Exception as e:
-            raise Exception(f"抖音视频下载失败：{str(e)}")
-    
-    def _download_audio_douyin(self, url, progress_callback=None):
-        """抖音音频提取：API下载视频 + ffmpeg转MP3"""
-        if not self.ffmpeg_available:
-            raise Exception("音频提取需要ffmpeg，请先安装ffmpeg")
-        
-        info = self.douyin_downloader.get_video_info(url)
-        if not info:
-            raise Exception("无法获取抖音视频信息")
-        
-        video_title = info['title']
-        clean_title = self.clean_filename(video_title)
-        
-        mp3_output_path = os.path.join(self.audio_dir, f"{clean_title}.mp3")
-        counter = 1
-        while os.path.exists(mp3_output_path):
-            mp3_output_path = os.path.join(self.audio_dir, f"{clean_title}_{counter}.mp3")
-            counter += 1
-        
-        temp_dir = tempfile.gettempdir()
-        temp_video_path = os.path.join(temp_dir, f"temp_audio_{os.getpid()}.mp4")
-        
-        try:
-            def progress_wrapper(percent, downloaded, total):
-                if progress_callback and total > 0:
-                    progress_callback(percent * 0.8, downloaded, total)
-            
-            video_url = info['video_url']
-            if not video_url:
-                raise Exception("无法获取视频下载地址")
-            
-            self.douyin_downloader._download_file(video_url, temp_video_path, progress_wrapper)
-            
-            if progress_callback:
-                progress_callback(80, 80, 100)
-            
-            subprocess.run([
-                'ffmpeg', '-i', temp_video_path,
-                '-vn', '-acodec', 'libmp3lame',
-                '-ab', '192k',
-                '-y',
-                mp3_output_path
-            ], check=True, capture_output=True)
-            
-            if progress_callback:
-                progress_callback(100, 100, 100)
-            
-            return {
-                'success': True,
-                'title': video_title,
-                'save_path': self.audio_dir,
-                'file_path': mp3_output_path
-            }
-            
-        finally:
-            if os.path.exists(temp_video_path):
-                try:
-                    os.remove(temp_video_path)
-                except:
-                    pass
     
     def _download_ytdlp(self, url, progress_callback=None):
         """使用yt-dlp下载视频"""
@@ -1119,7 +701,7 @@ class VideoDownloader:
             'merge_output_format': 'mp4',
         }
         
-        # 抖音等平台需要cookies认证
+        # Cookies为可选功能，仅在部分受限视频时需要
         if self._has_cookies:
             ydl_opts['cookiefile'] = self.cookies_path
         
@@ -1142,6 +724,9 @@ class VideoDownloader:
                 'file_path': final_path
             }
         except Exception as e:
+            # 如果下载失败且没有cookies，提示添加cookies
+            if not self._has_cookies:
+                raise Exception(f"视频下载失败，可能是部分视频需要登录。如需登录，请将cookies.json放在程序同目录下。\n\n错误详情: {str(e)}")
             raise Exception(f"视频下载失败：{str(e)}")
     
     def _download_audio_ytdlp(self, url, progress_callback=None):
@@ -1169,7 +754,7 @@ class VideoDownloader:
             'no_check_certificate': True,
         }
         
-        # 抖音等平台需要cookies认证
+        # Cookies为可选功能，仅在部分受限视频时需要
         if self._has_cookies:
             ydl_opts['cookiefile'] = self.cookies_path
         
@@ -1213,7 +798,7 @@ class VideoDownloader:
             'skip_download': True,
         }
         
-        # 抖音等平台需要cookies认证
+        # Cookies为可选功能，仅在部分受限视频时需要
         if self._has_cookies:
             ydl_opts['cookiefile'] = self.cookies_path
         
@@ -1606,6 +1191,16 @@ class ClipboardMonitorGUI:
             bg=self.COLORS['bg_primary']
         )
         subtitle_label.pack(side=tk.BOTTOM, anchor=tk.W, pady=(5, 0))
+        
+        # 作者标识
+        author_label = tk.Label(
+            title_frame,
+            text="作者：铭晨 ·Vx MingCv1",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            foreground=self.COLORS['accent'],
+            bg=self.COLORS['bg_primary']
+        )
+        author_label.pack(side=tk.RIGHT, padx=(15, 0))
         
         # ========== 监控状态卡片 ==========
         status_card = tk.Frame(main_frame, bg=self.COLORS['bg_secondary'], relief='flat', bd=0)
